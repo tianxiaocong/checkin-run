@@ -1,0 +1,35 @@
+name: Auto Login Check-in
+
+on:
+  schedule:
+    - cron: "0 5 * * *"  # 每天 UTC 5 点
+  workflow_dispatch:
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run auto login (check-in)
+        env:
+          ACCOUNTS: ${{ secrets.ACCOUNTS }}
+
+          # 邮件相关
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python checkin.py
