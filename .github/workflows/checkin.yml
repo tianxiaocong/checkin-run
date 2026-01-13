@@ -2,7 +2,7 @@ name: Auto Login Check-in
 
 on:
   schedule:
-    - cron: "0 5 * * *"  # 每天 UTC 5 点
+    - cron: "0 21 * * *"  # 每天北京5点
   workflow_dispatch:
 
 jobs:
