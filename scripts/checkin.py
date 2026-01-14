@@ -14,7 +14,7 @@ CHECKIN_URL = "https://mufyai.com/api/users/checkin"
 
 TIMEOUT = 10
 RETRY = 3
-DELAY_RANGE = (5, 10)
+DELAY_RANGE = (5, 15)
 
 # ================== 工具函数 ==================
 def log(msg: str):
