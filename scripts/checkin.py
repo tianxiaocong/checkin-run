@@ -58,7 +58,6 @@ def do_checkin(session, token):
             },
             timeout=TIMEOUT
         )
-
         if r.status_code != 200:
             return False, f"HTTP {r.status_code}"
 
@@ -75,16 +74,17 @@ def do_checkin(session, token):
         return False, str(e)
 
 def get_total_cat_food(session, token):
-    """获取历史猫粮流水，计算总猫粮"""
+    """获取历史猫粮流水，计算总猫粮和今日签到猫粮"""
     try:
-        r = session.get(
+        r = session.post(
             TRANSACTION_URL,
             headers={
                 "Authorization": f"Bearer {token}",
-                "User-Agent": "Mozilla/5.0"
+                "User-Agent": "Mozilla/5.0",
+                "Content-Type": "application/json"
             },
-            timeout=TIMEOUT,
-            params={"page": 1, "pageSize": 100}  # 拉取最近100条记录
+            json={"page": 1, "pageSize": 100},  # 拉取最近100条
+            timeout=TIMEOUT
         )
         if r.status_code != 200:
             log(f"获取流水失败 HTTP {r.status_code}")
@@ -96,8 +96,9 @@ def get_total_cat_food(session, token):
             return None
 
         records = result["data"]["data"]
-        total = sum(r["amount"] for r in records)
-        # 统计今天签到获得的猫粮
+        total_cat_food = sum(r["amount"] for r in records)
+
+        # 今日签到猫粮
         today = datetime.date.today()
         today_rewards = [
             r["amount"] for r in records
@@ -105,7 +106,7 @@ def get_total_cat_food(session, token):
                datetime.datetime.fromisoformat(r["createdAt"].split(".")[0]).date() == today
         ]
         today_total = sum(today_rewards)
-        return total, today_total
+        return total_cat_food, today_total
 
     except Exception as e:
         log(f"获取流水异常: {e}")
