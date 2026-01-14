@@ -13,8 +13,8 @@ PROFILE_URL = "https://mufyai.com/api/users/profiles"
 CHECKIN_URL = "https://mufyai.com/api/users/checkin"
 
 TIMEOUT = 10
-RETRY = 3
-DELAY_RANGE = (5, 15)
+RETRY = 3            # 登录/签到重试次数
+DELAY_RANGE = (5, 15)  # 每个账号间延迟
 
 # ================== 工具函数 ==================
 def log(msg: str):
@@ -46,37 +46,48 @@ def send_email(subject: str, content: str):
         log(f"❌ 邮件发送失败: {e}")
 
 # ================== 核心功能 ==================
-def do_checkin(session, token):
-    try:
-        r = session.post(
-            CHECKIN_URL,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "User-Agent": "Mozilla/5.0"
-            },
-            timeout=TIMEOUT
-        )
+def do_checkin(session, token, retry=3):
+    for attempt in range(1, retry + 1):
+        try:
+            r = session.post(
+                CHECKIN_URL,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "User-Agent": "Mozilla/5.0"
+                },
+                timeout=TIMEOUT
+            )
 
-        if r.status_code != 200:
-            return False, f"HTTP {r.status_code}"
+            if r.status_code == 200:
+                result = r.json()
+                if result.get("code") == 200:
+                    return True, "签到成功 +30 猫粮"
+                reason = result.get("reason", "")
+                if "已" in reason:
+                    return True, "今日已签到"
+                return False, reason or "签到失败"
 
-        result = r.json()
+            elif r.status_code == 429:
+                log(f"⚠️ 服务器返回 429（请求过多），第 {attempt}/{retry} 次重试")
+                time.sleep(random.randint(10, 20))
+                continue
+            elif r.status_code >= 500:
+                log(f"⚠️ 服务器错误 {r.status_code}，第 {attempt}/{retry} 次重试")
+                time.sleep(random.randint(5, 10))
+                continue
+            else:
+                return False, f"HTTP {r.status_code}"
 
-        if result.get("code") == 200:
-            return True, "签到成功 +30 猫粮"
+        except Exception as e:
+            if attempt == retry:
+                return False, str(e)
+            time.sleep(2)
 
-        # 已签到也当成功
-        reason = result.get("reason", "")
-        if "已" in reason:
-            return True, "今日已签到"
-
-        return False, reason or "签到失败"
-
-    except Exception as e:
-        return False, str(e)
+    return False, f"多次请求失败（{retry} 次）"
 
 def process_account(email: str, password: str):
     session = requests.Session()
+    username = None
 
     # ---------- 登录 ----------
     for attempt in range(1, RETRY + 1):
@@ -98,7 +109,7 @@ def process_account(email: str, password: str):
             if result.get("code") != 200:
                 return {
                     "email": email,
-                    "username": None,
+                    "username": username or email,
                     "status": "failed",
                     "reason": result.get("reason", "登录失败")
                 }
@@ -112,17 +123,13 @@ def process_account(email: str, password: str):
             if attempt == RETRY:
                 return {
                     "email": email,
-                    "username": None,
+                    "username": username or email,
                     "status": "failed",
                     "reason": str(e)
                 }
             time.sleep(2)
 
-    # ---------- 签到 ----------
-    checkin_ok, checkin_msg = do_checkin(session, token)
-
     # ---------- 获取用户名 ----------
-    username = None
     try:
         r = session.get(
             PROFILE_URL,
@@ -140,9 +147,12 @@ def process_account(email: str, password: str):
     except:
         pass
 
+    # ---------- 签到 ----------
+    checkin_ok, checkin_msg = do_checkin(session, token)
+
     return {
         "email": email,
-        "username": username,
+        "username": username or email,
         "status": "success" if checkin_ok else "failed",
         "reason": checkin_msg
     }
@@ -179,15 +189,13 @@ def main():
 
     lines = []
     lines.append("自动签到结果汇总\n")
-
     lines.append(f"成功：{len(success)}")
     for r in success:
         lines.append(f"  - {r['username'] or r['email']}：{r['reason']}")
-
     lines.append("")
     lines.append(f"失败：{len(failed)}")
     for r in failed:
-        lines.append(f"  - {r['email']}：{r['reason']}")
+        lines.append(f"  - {r['username'] or r['email']}：{r['reason']}")
 
     mail_content = "\n".join(lines)
 
