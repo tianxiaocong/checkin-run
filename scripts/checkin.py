@@ -41,10 +41,59 @@ def send_email(subject: str, content: str):
             server.login(smtp_user, smtp_pass)
             server.send_message(msg)
         log("📧 邮件发送成功")
-    except smtplib.SMTPException as e:
-        log(f"❌ 邮件发送失败: {str(e)}")  # 捕捉邮件发送错误
     except Exception as e:
-        log(f"❌ 邮件发送失败: {str(e)}")  # 捕捉其他异常
+        log(f"❌ 邮件发送失败: {str(e)}")
+
+def send_wechat(title: str, content: str):
+    wx_url = os.getenv("WX_PUSH_URL")
+    wx_token = os.getenv("WX_PUSH_TOKEN")
+
+    if not wx_url or not wx_token:
+        log("⚠️ 未配置微信推送，跳过微信通知")
+        return
+
+    try:
+        r = requests.post(
+            wx_url,
+            headers={
+                "Authorization": wx_token,
+                "Content-Type": "application/json"
+            },
+            json={
+                "title": title,
+                "content": content
+            },
+            timeout=10
+        )
+
+        if r.status_code == 200:
+            log("📲 微信推送成功")
+        else:
+            log(f"❌ 微信推送失败 HTTP {r.status_code}: {r.text}")
+    except Exception as e:
+        log(f"❌ 微信推送异常: {str(e)}")
+
+def build_wechat_message(results):
+    success = [r for r in results if r["status"] == "success"]
+    failed = [r for r in results if r["status"] == "failed"]
+
+    lines = []
+    lines.append("📅 自动签到报告")
+    lines.append("━━━━━━━━━━━━━━")
+    lines.append(f"⏰ 时间：{time.strftime('%Y-%m-%d %H:%M')}")
+    lines.append("")
+    lines.append(f"✅ 成功（{len(success)}）")
+    for r in success:
+        lines.append(f"• {r['username']}：{r['reason']}")
+
+    if failed:
+        lines.append("")
+        lines.append(f"❌ 失败（{len(failed)}）")
+        for r in failed:
+            lines.append(f"• {r['username']}：{r['reason']}")
+
+    lines.append("━━━━━━━━━━━━━━")
+    return "\n".join(lines)
 
 # ================== 核心功能 ==================
 def do_checkin(session, token):
@@ -67,7 +116,6 @@ def do_checkin(session, token):
                 return True, "今日已签到"
             return False, reason or "签到失败"
 
-        # 处理常见错误状态
         elif r.status_code == 429:
             return False, "HTTP 429（请求过多）"
         elif r.status_code >= 500:
@@ -80,9 +128,9 @@ def do_checkin(session, token):
 
 def process_account(email: str, password: str):
     session = requests.Session()
-    username = None
+    username = email
 
-    # ---------- 登录 ---------- 
+    # ---------- 登录 ----------
     try:
         r = session.post(
             LOGIN_URL,
@@ -94,29 +142,18 @@ def process_account(email: str, password: str):
             timeout=TIMEOUT
         )
 
-        if r.status_code != 200:
-            raise Exception(f"HTTP {r.status_code}")
-
+        r.raise_for_status()
         result = r.json()
+
         if result.get("code") != 200:
-            return {
-                "email": email,
-                "username": username or email,
-                "status": "failed",
-                "reason": result.get("reason", "登录失败")
-            }
+            return {"email": email, "username": email, "status": "failed", "reason": result.get("reason", "登录失败")}
 
         data = result["data"]
         token = data["token"]
         user_id = data.get("userId")
 
     except Exception as e:
-        return {
-            "email": email,
-            "username": username or email,
-            "status": "failed",
-            "reason": str(e)
-        }
+        return {"email": email, "username": email, "status": "failed", "reason": str(e)}
 
     # ---------- 获取用户名 ----------
     try:
@@ -132,24 +169,23 @@ def process_account(email: str, password: str):
         if r.status_code == 200:
             result = r.json()
             if result.get("code") == 200:
-                username = result["data"].get("username")
+                username = result["data"].get("username") or email
     except:
         pass
 
     # ---------- 签到 ----------
-    checkin_ok, checkin_msg = do_checkin(session, token)
+    ok, msg = do_checkin(session, token)
 
     return {
         "email": email,
-        "username": username or email,
-        "status": "success" if checkin_ok else "failed",
-        "reason": checkin_msg
+        "username": username,
+        "status": "success" if ok else "failed",
+        "reason": msg
     }
 
 # ================== 主程序 ==================
 def main():
     accounts = json.loads(os.getenv("ACCOUNTS", "[]"))
-
     if not accounts:
         log("❌ 未配置 ACCOUNTS")
         return
@@ -164,11 +200,8 @@ def main():
         result = process_account(email, password)
         results.append(result)
 
-        name = result["username"] or email
-        if result["status"] == "success":
-            log(f"✅ {name}：{result['reason']}")
-        else:
-            log(f"❌ {name}：{result['reason']}")
+        icon = "✅" if result["status"] == "success" else "❌"
+        log(f"{icon} {result['username']}：{result['reason']}")
 
         time.sleep(random.randint(*DELAY_RANGE))
 
@@ -176,25 +209,29 @@ def main():
     success = [r for r in results if r["status"] == "success"]
     failed = [r for r in results if r["status"] == "failed"]
 
-    lines = []
-    lines.append("自动签到结果汇总\n")
-    lines.append(f"成功：{len(success)}")
+    mail_lines = []
+    mail_lines.append("自动签到结果汇总\n")
+    mail_lines.append(f"成功：{len(success)}")
     for r in success:
-        lines.append(f"  - {r['username'] or r['email']}：{r['reason']}")
-    lines.append("")
-    lines.append(f"失败：{len(failed)}")
+        mail_lines.append(f"  - {r['username']}：{r['reason']}")
+    mail_lines.append("")
+    mail_lines.append(f"失败：{len(failed)}")
     for r in failed:
-        lines.append(f"  - {r['username'] or r['email']}：{r['reason']}")
+        mail_lines.append(f"  - {r['username']}：{r['reason']}")
 
-    mail_content = "\n".join(lines)
+    mail_content = "\n".join(mail_lines)
 
     log("========== 汇总 ==========")
     log(mail_content)
 
-    if failed:
-        send_email("❌ 自动签到存在失败账号", mail_content)
-    else:
-        send_email("✅ 自动签到全部成功", mail_content)
+    # 邮件
+    subject = "❌ 自动签到存在失败账号" if failed else "✅ 自动签到全部成功"
+    send_email(subject, mail_content)
+
+    # 微信
+    wx_title = f"签到完成｜成功 {len(success)} / 失败 {len(failed)}"
+    wx_content = build_wechat_message(results)
+    send_wechat(wx_title, wx_content)
 
 if __name__ == "__main__":
     main()
