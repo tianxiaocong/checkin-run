@@ -13,8 +13,7 @@ PROFILE_URL = "https://mufyai.com/api/users/profiles"
 CHECKIN_URL = "https://mufyai.com/api/users/checkin"
 
 TIMEOUT = 10
-RETRY = 3
-DELAY_RANGE = (5, 15)
+DELAY_RANGE = (5, 15)  # 每个账号间延迟
 
 # ================== 工具函数 ==================
 def log(msg: str):
@@ -22,7 +21,7 @@ def log(msg: str):
 
 def send_email(subject: str, content: str):
     smtp_server = os.getenv("SMTP_SERVER")
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))  # 使用 587 端口（STARTTLS）
+    smtp_port = int(os.getenv("SMTP_PORT", "465"))
     smtp_user = os.getenv("SMTP_USER")
     smtp_pass = os.getenv("SMTP_PASS")
     mail_to = os.getenv("MAIL_TO")
@@ -38,13 +37,14 @@ def send_email(subject: str, content: str):
     msg.attach(MIMEText(content, "plain", "utf-8"))
 
     try:
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()  # 启用 STARTTLS
+        with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
             server.login(smtp_user, smtp_pass)
             server.send_message(msg)
         log("📧 邮件发送成功")
+    except smtplib.SMTPException as e:
+        log(f"❌ 邮件发送失败: {str(e)}")  # 捕捉邮件发送错误
     except Exception as e:
-        log(f"❌ 邮件发送失败: {e}")
+        log(f"❌ 邮件发送失败: {str(e)}")  # 捕捉其他异常
 
 # ================== 核心功能 ==================
 def do_checkin(session, token):
@@ -58,72 +58,67 @@ def do_checkin(session, token):
             timeout=TIMEOUT
         )
 
-        if r.status_code != 200:
-            return False, "签到失败"
+        if r.status_code == 200:
+            result = r.json()
+            if result.get("code") == 200:
+                return True, "签到成功"
+            reason = result.get("reason", "")
+            if "已" in reason:
+                return True, "今日已签到"
+            return False, reason or "签到失败"
 
-        result = r.json()
-
-        if result.get("code") == 200:
-            return True, "签到成功 +30 猫粮"
-
-        # 已签到也当成功
-        reason = result.get("reason", "")
-        if "已" in reason:
-            return True, "今日已签到"
-
-        return False, reason or "签到失败"
+        # 处理常见错误状态
+        elif r.status_code == 429:
+            return False, "HTTP 429（请求过多）"
+        elif r.status_code >= 500:
+            return False, f"HTTP {r.status_code}（服务器错误）"
+        else:
+            return False, f"HTTP {r.status_code}"
 
     except Exception as e:
         return False, str(e)
 
 def process_account(email: str, password: str):
     session = requests.Session()
+    username = None
 
-    # ---------- 登录 ----------
-    for attempt in range(1, RETRY + 1):
-        try:
-            r = session.post(
-                LOGIN_URL,
-                json={"email": email, "password": password},
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0"
-                },
-                timeout=TIMEOUT
-            )
+    # ---------- 登录 ---------- 
+    try:
+        r = session.post(
+            LOGIN_URL,
+            json={"email": email, "password": password},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0"
+            },
+            timeout=TIMEOUT
+        )
 
-            if r.status_code != 200:
-                raise Exception(f"HTTP {r.status_code}")
+        if r.status_code != 200:
+            raise Exception(f"HTTP {r.status_code}")
 
-            result = r.json()
-            if result.get("code") != 200:
-                return {
-                    "email": email,
-                    "username": None,
-                    "status": "failed",
-                    "reason": result.get("reason", "登录失败")
-                }
+        result = r.json()
+        if result.get("code") != 200:
+            return {
+                "email": email,
+                "username": username or email,
+                "status": "failed",
+                "reason": result.get("reason", "登录失败")
+            }
 
-            data = result["data"]
-            token = data["token"]
-            user_id = data.get("userId")
-            break
+        data = result["data"]
+        token = data["token"]
+        user_id = data.get("userId")
 
-        except Exception as e:
-            if attempt == RETRY:
-                return {
-                    "email": email,
-                    "username": None,
-                    "status": "failed",
-                    "reason": "登录失败"
-                }
-            time.sleep(2)
-
-    # ---------- 签到 ----------
-    checkin_ok, checkin_msg = do_checkin(session, token)
+    except Exception as e:
+        return {
+            "email": email,
+            "username": username or email,
+            "status": "failed",
+            "reason": str(e)
+        }
 
     # ---------- 获取用户名 ----------
-    username = None
     try:
         r = session.get(
             PROFILE_URL,
@@ -140,6 +135,9 @@ def process_account(email: str, password: str):
                 username = result["data"].get("username")
     except:
         pass
+
+    # ---------- 签到 ----------
+    checkin_ok, checkin_msg = do_checkin(session, token)
 
     return {
         "email": email,
@@ -180,11 +178,9 @@ def main():
 
     lines = []
     lines.append("自动签到结果汇总\n")
-
     lines.append(f"成功：{len(success)}")
     for r in success:
         lines.append(f"  - {r['username'] or r['email']}：{r['reason']}")
-
     lines.append("")
     lines.append(f"失败：{len(failed)}")
     for r in failed:
