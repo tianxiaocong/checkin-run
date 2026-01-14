@@ -16,7 +16,7 @@ TRANSACTION_URL = "https://mufyai.com/api/transactions/history"
 
 TIMEOUT = 10
 RETRY = 3
-DELAY_RANGE = (5, 10)
+DELAY_RANGE = (5, 15)  # 随机延迟，防止限流
 
 # ================== 工具函数 ==================
 def log(msg: str):
@@ -63,7 +63,7 @@ def do_checkin(session, token):
 
         result = r.json()
         if result.get("code") == 200:
-            return True, "签到成功 +30 猫粮"
+            return True, "签到成功"
 
         reason = result.get("reason", "")
         if "已" in reason:
@@ -74,43 +74,66 @@ def do_checkin(session, token):
         return False, str(e)
 
 def get_total_cat_food(session, token):
-    """获取历史猫粮流水，计算总猫粮和今日签到猫粮"""
-    try:
-        r = session.post(
-            TRANSACTION_URL,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "User-Agent": "Mozilla/5.0",
-                "Content-Type": "application/json"
-            },
-            json={"page": 1, "pageSize": 100},  # 拉取最近100条
-            timeout=TIMEOUT
-        )
-        if r.status_code != 200:
-            log(f"获取流水失败 HTTP {r.status_code}")
+    """
+    获取历史猫粮流水，统计总猫粮和今日签到猫粮
+    自动翻页，每页最多100条
+    遇到 429 自动等待重试
+    """
+    total_cat_food = 0
+    today_total = 0
+    today = datetime.date.today()
+    page = 1
+    pageSize = 100
+
+    while True:
+        try:
+            r = session.post(
+                TRANSACTION_URL,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "User-Agent": "Mozilla/5.0",
+                    "Content-Type": "application/json"
+                },
+                json={"page": page, "pageSize": pageSize},
+                timeout=TIMEOUT
+            )
+
+            if r.status_code == 429:
+                log(f"限流 429，等待 10 秒重试")
+                time.sleep(10)
+                continue
+
+            if r.status_code != 200:
+                log(f"获取流水失败 HTTP {r.status_code}")
+                return None
+
+            result = r.json()
+            if result.get("code") != 200:
+                log(f"获取流水失败: {result.get('reason')}")
+                return None
+
+            records = result["data"]["data"]
+
+            # 累加总猫粮
+            for rec in records:
+                total_cat_food += rec["amount"]
+                if rec["description"] == "每日签到奖励":
+                    created = datetime.datetime.fromisoformat(rec["createdAt"].split(".")[0]).date()
+                    if created == today:
+                        today_total += rec["amount"]
+
+            # 判断是否还有下一页
+            if result["data"].get("hasNext"):
+                page += 1
+                time.sleep(random.randint(*DELAY_RANGE))
+            else:
+                break
+
+        except Exception as e:
+            log(f"获取流水异常: {e}")
             return None
 
-        result = r.json()
-        if result.get("code") != 200:
-            log(f"获取流水失败: {result.get('reason')}")
-            return None
-
-        records = result["data"]["data"]
-        total_cat_food = sum(r["amount"] for r in records)
-
-        # 今日签到猫粮
-        today = datetime.date.today()
-        today_rewards = [
-            r["amount"] for r in records
-            if r["description"] == "每日签到奖励" and
-               datetime.datetime.fromisoformat(r["createdAt"].split(".")[0]).date() == today
-        ]
-        today_total = sum(today_rewards)
-        return total_cat_food, today_total
-
-    except Exception as e:
-        log(f"获取流水异常: {e}")
-        return None
+    return total_cat_food, today_total
 
 def process_account(email: str, password: str):
     session = requests.Session()
@@ -182,7 +205,11 @@ def process_account(email: str, password: str):
         pass
 
     # ---------- 获取猫粮总数 ----------
-    total_cat_food, today_reward = get_total_cat_food(session, token) or (0, 0)
+    cat_food_data = get_total_cat_food(session, token)
+    if cat_food_data is None:
+        total_cat_food, today_reward = 0, 0
+    else:
+        total_cat_food, today_reward = cat_food_data
 
     return {
         "email": email,
