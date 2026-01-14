@@ -13,7 +13,7 @@ PROFILE_URL = "https://mufyai.com/api/users/profiles"
 CHECKIN_URL = "https://mufyai.com/api/users/checkin"
 
 TIMEOUT = 10
-RETRY = 3            # 登录/签到重试次数
+RETRY = 3            # 登录重试次数
 DELAY_RANGE = (5, 15)  # 每个账号间延迟
 
 # ================== 工具函数 ==================
@@ -42,48 +42,42 @@ def send_email(subject: str, content: str):
             server.login(smtp_user, smtp_pass)
             server.send_message(msg)
         log("📧 邮件发送成功")
+    except smtplib.SMTPException as e:
+        log(f"❌ 邮件发送失败: {str(e)}")  # 改进了异常处理，避免原始错误信息
     except Exception as e:
-        log(f"❌ 邮件发送失败: {e}")
+        log(f"❌ 邮件发送失败: {str(e)}")  # 捕捉其他异常
 
 # ================== 核心功能 ==================
-def do_checkin(session, token, retry=3):
-    for attempt in range(1, retry + 1):
-        try:
-            r = session.post(
-                CHECKIN_URL,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "User-Agent": "Mozilla/5.0"
-                },
-                timeout=TIMEOUT
-            )
+def do_checkin(session, token):
+    try:
+        r = session.post(
+            CHECKIN_URL,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "Mozilla/5.0"
+            },
+            timeout=TIMEOUT
+        )
 
-            if r.status_code == 200:
-                result = r.json()
-                if result.get("code") == 200:
-                    return True, "签到成功 +30 猫粮"
-                reason = result.get("reason", "")
-                if "已" in reason:
-                    return True, "今日已签到"
-                return False, reason or "签到失败"
+        if r.status_code == 200:
+            result = r.json()
+            if result.get("code") == 200:
+                return True, "签到成功 +30 猫粮"
+            reason = result.get("reason", "")
+            if "已" in reason:
+                return True, "今日已签到"
+            return False, reason or "签到失败"
 
-            elif r.status_code == 429:
-                log(f"⚠️ 服务器返回 429（请求过多），第 {attempt}/{retry} 次重试")
-                time.sleep(random.randint(10, 20))
-                continue
-            elif r.status_code >= 500:
-                log(f"⚠️ 服务器错误 {r.status_code}，第 {attempt}/{retry} 次重试")
-                time.sleep(random.randint(5, 10))
-                continue
-            else:
-                return False, f"HTTP {r.status_code}"
+        # 处理常见错误状态
+        elif r.status_code == 429:
+            return False, "HTTP 429（请求过多）"
+        elif r.status_code >= 500:
+            return False, f"HTTP {r.status_code}（服务器错误）"
+        else:
+            return False, f"HTTP {r.status_code}"
 
-        except Exception as e:
-            if attempt == retry:
-                return False, str(e)
-            time.sleep(2)
-
-    return False, f"多次请求失败（{retry} 次）"
+    except Exception as e:
+        return False, str(e)
 
 def process_account(email: str, password: str):
     session = requests.Session()
