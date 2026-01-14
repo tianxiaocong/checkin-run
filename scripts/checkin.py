@@ -6,11 +6,13 @@ import requests
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import datetime
 
 # ================== 配置 ==================
 LOGIN_URL = "https://mufyai.com/api/users/login"
 PROFILE_URL = "https://mufyai.com/api/users/profiles"
 CHECKIN_URL = "https://mufyai.com/api/users/checkin"
+TRANSACTION_URL = "https://mufyai.com/api/transactions/history"
 
 TIMEOUT = 10
 RETRY = 3
@@ -45,7 +47,7 @@ def send_email(subject: str, content: str):
     except Exception as e:
         log(f"❌ 邮件发送失败: {e}")
 
-# ================== 核心功能 ==================
+# ================== 核心逻辑 ==================
 def do_checkin(session, token):
     try:
         r = session.post(
@@ -61,19 +63,53 @@ def do_checkin(session, token):
             return False, f"HTTP {r.status_code}"
 
         result = r.json()
-
         if result.get("code") == 200:
             return True, "签到成功 +30 猫粮"
 
-        # 已签到也当成功
         reason = result.get("reason", "")
         if "已" in reason:
             return True, "今日已签到"
 
         return False, reason or "签到失败"
-
     except Exception as e:
         return False, str(e)
+
+def get_total_cat_food(session, token):
+    """获取历史猫粮流水，计算总猫粮"""
+    try:
+        r = session.get(
+            TRANSACTION_URL,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "Mozilla/5.0"
+            },
+            timeout=TIMEOUT,
+            params={"page": 1, "pageSize": 100}  # 拉取最近100条记录
+        )
+        if r.status_code != 200:
+            log(f"获取流水失败 HTTP {r.status_code}")
+            return None
+
+        result = r.json()
+        if result.get("code") != 200:
+            log(f"获取流水失败: {result.get('reason')}")
+            return None
+
+        records = result["data"]["data"]
+        total = sum(r["amount"] for r in records)
+        # 统计今天签到获得的猫粮
+        today = datetime.date.today()
+        today_rewards = [
+            r["amount"] for r in records
+            if r["description"] == "每日签到奖励" and
+               datetime.datetime.fromisoformat(r["createdAt"].split(".")[0]).date() == today
+        ]
+        today_total = sum(today_rewards)
+        return total, today_total
+
+    except Exception as e:
+        log(f"获取流水异常: {e}")
+        return None
 
 def process_account(email: str, password: str):
     session = requests.Session()
@@ -100,7 +136,9 @@ def process_account(email: str, password: str):
                     "email": email,
                     "username": None,
                     "status": "failed",
-                    "reason": result.get("reason", "登录失败")
+                    "reason": result.get("reason", "登录失败"),
+                    "today_reward": 0,
+                    "total_cat_food": 0
                 }
 
             data = result["data"]
@@ -114,7 +152,9 @@ def process_account(email: str, password: str):
                     "email": email,
                     "username": None,
                     "status": "failed",
-                    "reason": str(e)
+                    "reason": str(e),
+                    "today_reward": 0,
+                    "total_cat_food": 0
                 }
             time.sleep(2)
 
@@ -140,11 +180,16 @@ def process_account(email: str, password: str):
     except:
         pass
 
+    # ---------- 获取猫粮总数 ----------
+    total_cat_food, today_reward = get_total_cat_food(session, token) or (0, 0)
+
     return {
         "email": email,
         "username": username,
         "status": "success" if checkin_ok else "failed",
-        "reason": checkin_msg
+        "reason": checkin_msg,
+        "today_reward": today_reward,
+        "total_cat_food": total_cat_food
     }
 
 # ================== 主程序 ==================
@@ -167,7 +212,7 @@ def main():
 
         name = result["username"] or email
         if result["status"] == "success":
-            log(f"✅ {name}：{result['reason']}")
+            log(f"✅ {name}：{result['reason']}，今日 +{result['today_reward']} 猫粮，总数 {result['total_cat_food']}")
         else:
             log(f"❌ {name}：{result['reason']}")
 
@@ -180,20 +225,17 @@ def main():
     lines = []
     lines.append("自动签到结果汇总\n")
 
-    lines.append(f"成功：{len(success)}")
     for r in success:
-        lines.append(f"  - {r['username'] or r['email']}：{r['reason']}")
+        lines.append(f"✅ {r['username'] or r['email']}：{r['reason']}，今日 +{r['today_reward']} 猫粮，总数 {r['total_cat_food']}")
 
-    lines.append("")
-    lines.append(f"失败：{len(failed)}")
     for r in failed:
-        lines.append(f"  - {r['email']}：{r['reason']}")
+        lines.append(f"❌ {r['email']}：{r['reason']}")
 
     mail_content = "\n".join(lines)
-
     log("========== 汇总 ==========")
     log(mail_content)
 
+    # ---------- 邮件 ----------
     if failed:
         send_email("❌ 自动签到存在失败账号", mail_content)
     else:
